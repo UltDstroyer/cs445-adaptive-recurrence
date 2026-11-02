@@ -1,0 +1,6 @@
+torch
+numpy
+mne
+moabb
+scikit-learn
+matplotlib
