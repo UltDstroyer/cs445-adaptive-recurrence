@@ -1,6 +1,4 @@
-torch
-numpy
-mne
-moabb
-scikit-learn
-matplotlib
+numpy>=1.26
+torch>=2.3
+moabb>=1.2
+mne>=1.6
