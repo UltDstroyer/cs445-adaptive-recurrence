@@ -1,4 +1,4 @@
-# CS 445: Adaptive Recurrence
+# CS 445: Adaptive Recurrence - Meow
 
 Can a small recurrent network use fewer processing steps to classify motor-imagery EEG signals without losing much accuracy?
 
