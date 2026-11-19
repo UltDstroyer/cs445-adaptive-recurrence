@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from data import get_splits
-from model import AdaptiveRecurrentClassifier
+from model import model_from_checkpoint
 from train import select_device
 
 
@@ -48,18 +48,22 @@ def adaptive_predictions(model, x, batch_size, confidence, stability, min_steps)
     return torch.cat(logits), torch.cat(steps)
 
 
-def main():
+def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--checkpoint", type=Path, default=Path("checkpoints/model.pt"))
+    p.add_argument("--checkpoint", type=Path, default=Path("checkpoints/eeg_model.pt"))
     p.add_argument("--confidence", type=float, default=0.85)
     p.add_argument("--stability", type=float, default=0.05)
     p.add_argument("--min-steps", type=int, default=2)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     p.add_argument("--out", type=Path, default=Path("results/evaluation.json"))
-    args = p.parse_args()
+    args = p.parse_args(argv)
+    if args.batch_size < 1 or not 0 <= args.confidence <= 1 or not 0 <= args.stability <= 1:
+        p.error("batch-size must be positive; confidence and stability must be in [0, 1]")
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    if not 2 <= args.min_steps <= checkpoint["model_config"]["max_steps"]:
+        p.error("min-steps must be between 2 and the checkpoint's max_steps")
     demo = checkpoint["demo"]
     subject = checkpoint["subject"]
     stats = (checkpoint["channel_mean"], checkpoint["channel_std"])
@@ -68,13 +72,21 @@ def main():
         raise ValueError("Dataset session list differs from training")
 
     device = select_device(args.device)
-    model = AdaptiveRecurrentClassifier(**checkpoint["model_config"]).to(device)
-    model.load_state_dict(checkpoint["model_state"])
+    model = model_from_checkpoint(checkpoint).to(device)
     model.eval()
     results = {
         "subject": subject,
         "demo": demo,
         "checkpoint_epoch": checkpoint["epoch"],
+        "seed": checkpoint["seed"],
+        "model_config": {
+            **checkpoint["model_config"],
+            "encoder_type": model.encoder_type,
+            "dropout": model.dropout,
+        },
+        "device": str(device),
+        "batch_size": args.batch_size,
+        "parameters": sum(parameter.numel() for parameter in model.parameters()),
         "sessions": splits.session_names,
         "confidence": args.confidence,
         "stability": args.stability,
@@ -87,7 +99,7 @@ def main():
         labels = getattr(splits, f"{split_name}_y")
         x = torch.from_numpy(x_np).to(device)
         with torch.inference_mode():
-            all_logits = model(x).cpu()
+            all_logits = torch.cat([model(batch).cpu() for batch in x.split(args.batch_size)])
         fixed_accuracies = [accuracy(all_logits[:, i], labels) for i in range(model.max_steps)]
         adaptive_logits, used = adaptive_predictions(
             model, x, args.batch_size, args.confidence, args.stability, args.min_steps

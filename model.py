@@ -8,29 +8,77 @@ import torch
 from torch import nn
 
 
+DEFAULT_HIDDEN_SIZE = 64
+DEFAULT_MAX_STEPS = 12
+DEFAULT_ENCODER = "eeg"
+DEFAULT_DROPOUT = 0.25
+
+
+class EEGEncoder(nn.Module):
+    """EEGNet-inspired temporal, spatial, and separable filters for [B, C, T]."""
+
+    def __init__(self, channels: int, hidden_size: int, dropout: float):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 8, (1, 51), padding=(0, 25), bias=False),
+            nn.BatchNorm2d(8),
+            nn.Conv2d(8, 16, (channels, 1), groups=8, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ELU(),
+            nn.AvgPool2d((1, 4), ceil_mode=True),
+            nn.Dropout(dropout),
+            nn.Conv2d(16, 16, (1, 15), padding=(0, 7), groups=16, bias=False),
+            nn.Conv2d(16, 16, 1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ELU(),
+            nn.AvgPool2d((1, 8), ceil_mode=True),
+            nn.Dropout(dropout),
+            nn.AdaptiveAvgPool2d((1, 4)),
+            nn.Flatten(),
+            nn.Linear(16 * 4, hidden_size),
+            nn.Tanh(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x.unsqueeze(1))
+
+
 class AdaptiveRecurrentClassifier(nn.Module):
     def __init__(
         self,
         channels: int = 3,
         samples: int = 301,
-        hidden_size: int = 64,
+        hidden_size: int = DEFAULT_HIDDEN_SIZE,
         num_classes: int = 2,
-        max_steps: int = 6,
+        max_steps: int = DEFAULT_MAX_STEPS,
+        encoder_type: str = DEFAULT_ENCODER,
+        dropout: float = DEFAULT_DROPOUT,
     ):
         super().__init__()
         if min(channels, samples, hidden_size, num_classes, max_steps) < 1:
             raise ValueError("All model dimensions must be positive")
+        if encoder_type not in ("eeg", "dense"):
+            raise ValueError("encoder_type must be 'eeg' or 'dense'")
+        if not 0 <= dropout < 1:
+            raise ValueError("dropout must be in [0, 1)")
         self.channels = channels
         self.samples = samples
         self.hidden_size = hidden_size
         self.num_classes = num_classes
         self.max_steps = max_steps
+        self.encoder_type = encoder_type
+        self.dropout = dropout
 
-        self.encoder = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(channels * samples, hidden_size),
-            nn.Tanh(),
-        )
+        if encoder_type == "eeg":
+            self.encoder = EEGEncoder(channels, hidden_size, dropout)
+        else:
+            # Preserve the parameter names of the original dense checkpoints.
+            self.encoder = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(channels * samples, hidden_size),
+                nn.Tanh(),
+                nn.Dropout(dropout),
+            )
         self.recurrent = nn.Linear(hidden_size * 2, hidden_size)
         self.norm = nn.LayerNorm(hidden_size)
         self.classifier = nn.Linear(hidden_size, num_classes)
@@ -117,3 +165,13 @@ class AdaptiveRecurrentClassifier(nn.Module):
             previous_classes = predicted[remaining]
 
         return output, steps_taken
+
+
+def model_from_checkpoint(checkpoint: dict) -> AdaptiveRecurrentClassifier:
+    """Load current models and original dense-encoder checkpoints."""
+    config = dict(checkpoint["model_config"])
+    if "encoder_type" not in config:
+        config.update(encoder_type="dense", dropout=0.0)
+    model = AdaptiveRecurrentClassifier(**config)
+    model.load_state_dict(checkpoint["model_state"])
+    return model
