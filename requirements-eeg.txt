@@ -1,0 +1,4 @@
+# Optional dependencies for the historical EEG experiments.
+-r requirements.txt
+moabb>=1.2
+mne>=1.6

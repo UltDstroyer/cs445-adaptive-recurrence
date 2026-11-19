@@ -1,52 +1,98 @@
-# CS 445: Adaptive Recurrence - Meow
+# CS 445: Fashion-MNIST DNN
 
-Can a small recurrent network use fewer processing steps to classify motor-imagery EEG signals without losing much accuracy?
+This project trains a feedforward deep neural network to classify clothing images.
+The main experiment now uses a DNN and Fashion-MNIST.
 
-This project uses BCI Competition IV Dataset 2b (left-hand versus right-hand imagery). The network encodes an EEG window, applies the same recurrent block up to six times, and predicts after every pass. During adaptive inference, it can stop when the predicted class, confidence, and probabilities are stable.
+[Fashion-MNIST](https://github.com/zalandoresearch/fashion-mnist) contains 60,000
+training images and 10,000 test images. Each image is 28 by 28 pixels in grayscale,
+with one of ten clothing labels. This is a practical benchmark for a fully
+connected DNN.
+
+The default network is:
+
+    28 x 28 image -> Flatten (784) -> Dense (256) -> ReLU -> Dropout
+                 -> Dense (128) -> ReLU -> Dropout -> Dense (10)
+
+Each dense layer has its own weights. The model produces one prediction per
+image in a single forward pass. Training uses cross-entropy loss and AdamW,
+with dropout 0.2 and learning rate 0.001.
 
 ## Setup
 
     python -m venv .venv
-    source .venv/bin/activate
-    python -m pip install -r requirements.txt
+    .venv\Scripts\python.exe -m pip install -r requirements.txt
 
-## Run with EEG data
+On macOS/Linux, use .venv/bin/python in place of .venv\Scripts\python.exe.
 
-    python data.py --subject 1
-    python train.py --subject 1 --epochs 12
-    python evaluate.py --checkpoint checkpoints/model.pt
+## Train and evaluate
 
-The first run downloads participant 1 through MOABB. Preprocessing uses an 8-32 Hz filter, 100 Hz resampling, and a 0.5-3.5 second window relative to the task event. The first three sessions are training data, the fourth is validation, and the fifth is held-out test data. Only the training sessions determine normalization statistics.
+    .venv\Scripts\python.exe data.py
+    .venv\Scripts\python.exe train.py --epochs 12
+    .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/dnn.pt
 
-Training saves the best validation checkpoint to checkpoints/model.pt. Evaluation reports fixed-depth accuracies, adaptive accuracy, average iterations, latency, and exit counts; it also writes results/evaluation.json. Checkpoints, results, and downloaded data are excluded from Git.
+The first run downloads Fashion-MNIST from the publisher's HTTPS repository into
+data/vision/. The official training partition is split into 50,000 training and
+10,000 validation images using a fixed random split seed (7). The official
+10,000 test images remain separate. Pixels are scaled to [0, 1], then standardized
+using only the training split's mean and standard deviation.
 
-Stopping thresholds can be adjusted without retraining:
+Training saves the checkpoint with the highest validation accuracy, breaking
+ties with lower validation loss. The checkpoint includes the architecture,
+class names, split settings and normalization statistics. Evaluation restores
+these settings and reports loss, accuracy, macro-F1, class counts, a confusion
+matrix, and measured forward-pass time on validation and test images. Test
+metrics are not used for checkpoint selection.
 
-    python evaluate.py --confidence 0.75 --stability 0.10
+Default outputs:
 
-## Quick pipeline check without EEG downloads
+- checkpoints/dnn.pt: best validation checkpoint.
+- checkpoints/dnn_training.json: epoch history and training settings.
+- results/dnn_evaluation.json: evaluation metrics.
 
-    python data.py --demo
-    python train.py --demo --epochs 2 --out checkpoints/demo.pt
-    python evaluate.py --checkpoint checkpoints/demo.pt --out results/demo.json
+To change the network or enable early stopping:
 
-Demo mode uses artificial signals. Its accuracy is NOT a BCI result.
+    .venv\Scripts\python.exe train.py --hidden-sizes 512 256 128 --dropout 0.3 --patience 4
+
+--seed changes model initialization and training randomness. --split-seed changes
+which official training images are reserved for validation. Keep the split seed
+fixed when comparing architectures. --data-dir changes the download/cache
+directory; evaluation also accepts it to relocate a saved experiment.
+--no-download requires the data to exist locally.
+
+## Offline pipeline check
+
+    .venv\Scripts\python.exe train.py --demo --epochs 2 --out checkpoints/dnn_demo.pt
+    .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/dnn_demo.pt --out results/dnn_demo.json
+
+Demo mode creates artificial ten-class images for checking the code. Its metrics
+are not Fashion-MNIST benchmark results.
+
+## Tests
+
+    .venv\Scripts\python.exe -m pip install pytest
+    .venv\Scripts\python.exe -m pytest -q
 
 ## Project files
 
-- data.py: trials, labels, session splits, and training-only normalization.
-- model.py: encoder, shared recurrent computation, and early stopping.
-- train.py: training with a loss at every recurrent depth.
-- evaluate.py: fixed and adaptive inference results and measured latency.
-- tests/: tests that require no EEG downloads.
+- data.py: image loading, train/validation split and normalization.
+- model.py: feedforward DNN and historical EEG model.
+- train.py: DNN training, validation checkpointing and epoch history.
+- evaluate.py: DNN classification metrics and forward-pass timing.
+- tests/: offline tests for the data pipeline, model, training and evaluation.
 
-To run tests:
+## Historical EEG work
 
-    python -m pip install pytest
-    python -m pytest -q
+The original EEG loading helpers, recurrent model and their regression tests
+remain for compatibility. The primary train.py and evaluate.py commands operate
+on DNN checkpoints; older EEG checkpoints cannot be evaluated with these commands.
+
+Optional EEG dependencies are listed in requirements-eeg.txt. EEG data inspection
+is available with python data.py --dataset eeg --subject 1. The obsolete untracked
+EEG research scripts, reports and experiment configurations have been removed.
 
 ## Limitations
 
-This is a small educational model, not a validated BCI system. One participant does not establish generalization to new people. Stopping thresholds are exploratory and should not be tuned on the held-out test set. Fewer recurrent passes do not guarantee faster wall-clock execution. Adaptive stopping saves processing on an already collected EEG window; it does not shorten the signal recording.
-
-AI assistance: ChatGPT wrote and checked the initial model, data pipeline, training, evaluation, and tests. The research experiments and interpretation remain ongoing.
+Fashion-MNIST measures image classification; it does not test temporal memory or
+EEG decoding. Forward-pass timings exclude image loading and device transfers.
+Use multiple training seeds and hold out the test set when comparing model
+settings. No trained accuracy is assumed from the architecture alone.
