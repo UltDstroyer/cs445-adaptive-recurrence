@@ -11,7 +11,7 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from data import DEFAULT_DATA_DIR, get_image_splits
+from data import DEFAULT_DATA_DIR, DEFAULT_SPLIT_SEED, PREPROCESSING, SPLIT_METHOD, get_image_splits
 from model import DEFAULT_DROPOUT, DEFAULT_HIDDEN_SIZES, DNNClassifier
 
 
@@ -49,7 +49,8 @@ def main(argv=None):
     p.add_argument("--weight-decay", type=float, default=0.0001)
     p.add_argument("--patience", type=int, default=0, help="Stop after this many unimproved epochs; 0 disables")
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--split-seed", type=int, default=7)
+    p.add_argument("--split-seed", type=int, default=DEFAULT_SPLIT_SEED,
+                   help="Keep fixed across training seeds so every run uses the same validation images")
     p.add_argument("--val-size", type=int)
     p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     p.add_argument("--out", type=Path, default=Path("checkpoints/dnn.pt"))
@@ -93,6 +94,8 @@ def main(argv=None):
         "data_dir": str(args.data_dir.resolve()),
         "val_size": len(splits.val_y),
         "split_seed": args.split_seed,
+        "split_method": SPLIT_METHOD,
+        "preprocessing": PREPROCESSING,
     }
     training_config = {
         "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
@@ -142,7 +145,6 @@ def main(argv=None):
                 "model_config": config, "data_config": data_config,
                 "training_config": training_config,
                 "class_names": list(splits.class_names),
-                "pixel_mean": splits.mean, "pixel_std": splits.std,
                 "val_accuracy": val["accuracy"], "val_loss": val["loss"], "epoch": epoch,
             }, args.out)
         else:

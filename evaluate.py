@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from data import get_image_splits
+from data import PREPROCESSING, SPLIT_METHOD, get_image_splits
 from model import DNNClassifier
 from train import make_loader, select_device
 
@@ -75,11 +75,12 @@ def main(argv=None):
     data_config = checkpoint["data_config"]
     if data_config["dataset"] != "fashion-mnist":
         p.error("Unsupported checkpoint dataset")
+    if (data_config.get("split_method"), data_config.get("preprocessing")) != (SPLIT_METHOD, PREPROCESSING):
+        p.error("Checkpoint was trained with an older data split or pixel normalization; retrain it with train.py")
     data_dir = args.data_dir or Path(data_config["data_dir"])
     splits = get_image_splits(
         data_dir=data_dir, demo=data_config["demo"],
         val_size=data_config["val_size"], split_seed=data_config["split_seed"],
-        stats=(checkpoint["pixel_mean"], checkpoint["pixel_std"]),
         download=not args.no_download,
     )
     if list(splits.class_names) != checkpoint["class_names"]:
@@ -93,7 +94,6 @@ def main(argv=None):
         "dataset": data_config["dataset"], "demo": data_config["demo"],
         "data_config": {**data_config, "data_dir": str(data_dir.resolve())},
         "class_names": list(splits.class_names), "checkpoint_epoch": checkpoint["epoch"],
-        "pixel_mean": checkpoint["pixel_mean"], "pixel_std": checkpoint["pixel_std"],
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
         "device": str(device), "splits": {},
     }

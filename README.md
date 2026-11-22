@@ -31,20 +31,28 @@ On macOS/Linux, use .venv/bin/python in place of .venv\Scripts\python.exe.
     .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/dnn.pt
 
 The first run downloads Fashion-MNIST from the publisher's HTTPS repository into
-data/vision/. The official training partition is split into 50,000 training and
-10,000 validation images using a fixed random split seed (7). The official
-10,000 test images remain separate. Pixels are scaled to [0, 1], then standardized
-using only the training split's mean and standard deviation.
+data/vision/. The official training partition is split into 54,000 training and
+6,000 validation images. The split is stratified, so validation has 600 images
+of each class, and it uses a fixed split seed (7) that stays the same across
+training seeds. The official 10,000 test images remain separate. Pixels are
+scaled to [0, 1] with no further normalization.
+
+data.py prints class counts for each split and saves a summary to
+results/data_summary.json: class counts, pixel statistics for the training and
+validation images, a disjointness check and a fingerprint of the validation
+images. Test images are counted only.
 
 Training saves the checkpoint with the highest validation accuracy, breaking
 ties with lower validation loss. The checkpoint includes the architecture,
-class names, split settings and normalization statistics. Evaluation restores
+class names and split settings. Evaluation refuses checkpoints made with the
+earlier random split or pixel standardization. Evaluation restores
 these settings and reports loss, accuracy, macro-F1, class counts, a confusion
 matrix, and measured forward-pass time on validation and test images. Test
 metrics are not used for checkpoint selection.
 
 Default outputs:
 
+- results/data_summary.json: split summary from data.py.
 - checkpoints/dnn.pt: best validation checkpoint.
 - checkpoints/dnn_training.json: epoch history and training settings.
 - results/dnn_evaluation.json: evaluation metrics.
@@ -74,7 +82,7 @@ are not Fashion-MNIST benchmark results.
 
 ## Project files
 
-- data.py: image loading, train/validation split and normalization.
+- data.py: image loading, stratified train/validation split, [0, 1] scaling and split summary.
 - model.py: feedforward DNN.
 - train.py: DNN training, validation checkpointing and epoch history.
 - evaluate.py: DNN classification metrics and forward-pass timing.
