@@ -170,6 +170,20 @@ outputs unless --final-test is given. Stopping rules live in rules.py (numpy
 only); applying a rule to saved outputs picks the same exits as running the
 network one exit at a time.
 
+## Figures
+
+    .venv\Scripts\python.exe plots.py exits --series "CNN=results/multi_exit_val_outputs.npz" --logistic results/logistic_val_outputs.npz
+    .venv\Scripts\python.exe plots.py confidence results/multi_exit_val_baselines.json
+
+plots.py draws from saved validation outputs only and writes PNGs, each with a
+CSV of the plotted numbers, to results/figures/:
+
+- exits: validation macro-F1 and accuracy at every exit (up to two networks,
+  given as NAME=outputs.npz), with the logistic-regression baseline as a
+  reference line;
+- confidence: macro-F1 against compute for the fixed exits and confidence-only
+  stopping, from sweep.py's results, with the 40%, 60% and 80% budgets marked.
+
 ## Offline pipeline check
 
     .venv\Scripts\python.exe data.py --demo
@@ -201,6 +215,7 @@ are not Fashion-MNIST benchmark results.
 - logistic.py: the logistic-regression baseline on pixels.
 - sweep.py: fixed exits, never-stop check, confidence sweep and a sample of
   predictions to inspect.
+- plots.py: figures (with CSV tables) from saved validation outputs.
 - tests/: offline tests for the data pipeline, model, training and evaluation.
 
 ## Earlier EEG experiment
@@ -221,5 +236,5 @@ evaluation, and tests. The research experiments and interpretation remain ongoin
 
 Claude (Anthropic) helped plan the early-exit experiments, removed the EEG code,
 and wrote the stratified split, the multi-exit MLP and CNN, multi-exit training,
-per-exit evaluation, compute accounting, the baselines and confidence sweep
+per-exit evaluation, compute accounting, the baselines and confidence sweep, the figures
 and their tests.
