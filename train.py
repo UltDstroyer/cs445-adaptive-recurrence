@@ -25,6 +25,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from data import DEFAULT_DATA_DIR, DEFAULT_SPLIT_SEED, PREPROCESSING, SPLIT_METHOD, get_image_splits
+from exit_outputs import macro_f1
 from model import (
     ARCHITECTURES, DEFAULT_BLOCK_HIDDEN, DEFAULT_CNN_CHANNELS, DEFAULT_CNN_DOWNSAMPLE_AT,
     DEFAULT_NUM_EXITS, DEFAULT_WIDTH, build_model,
@@ -60,17 +61,6 @@ def make_loader(x, y, batch_size, shuffle=False):
 def multi_exit_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy averaged over every exit and image; logits are [batch, exits, classes]."""
     return F.cross_entropy(logits.flatten(0, 1), labels.repeat_interleave(logits.shape[1]))
-
-
-def macro_f1(labels: np.ndarray, predicted: np.ndarray, num_classes: int) -> float:
-    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
-    np.add.at(confusion, (labels, predicted), 1)
-    denominator = confusion.sum(axis=0) + confusion.sum(axis=1)
-    f1 = np.divide(
-        2 * confusion.diagonal(), denominator,
-        out=np.zeros(num_classes, dtype=np.float64), where=denominator > 0,
-    )
-    return float(f1.mean())
 
 
 @torch.inference_mode()

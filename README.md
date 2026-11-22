@@ -101,6 +101,8 @@ Default outputs:
   every exit, epoch times and training settings.
 - checkpoints/multi_exit_resume.pt: progress saved after every epoch, used by
   --resume.
+- results/multi_exit_val_outputs.npz and .json: every exit's validation outputs
+  and scores, from evaluate.py.
 
 Useful options:
 
@@ -113,13 +115,27 @@ change the CNN, and --width and --block-hidden change the MLP. --data-dir
 changes the download/cache directory, and --no-download requires the data to
 exist locally.
 
-evaluate.py does not accept multi-exit checkpoints yet. Separate validation and
-test evaluation, with saved per-exit outputs, is the next piece of work.
+## Save per-exit outputs
+
+    .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/multi_exit.pt
+
+evaluate.py runs a trained network once over the validation images and saves
+every exit's logits, the labels and the image indices to
+results/multi_exit_val_outputs.npz, with per-exit accuracy, macro-F1 and loss in
+results/multi_exit_val_outputs.json. Threshold sweeps and stopping rules work
+from the .npz file with exit_outputs.load_exit_outputs, which needs only numpy:
+no PyTorch, model or images. An existing validation output is replaced only
+with --overwrite.
+
+The official test images are for the single final evaluation. evaluate.py
+refuses --split test unless --confirm-final-test is also given, and never
+overwrites an existing test output.
 
 ## Offline pipeline check
 
     .venv\Scripts\python.exe data.py --demo
     .venv\Scripts\python.exe train.py --demo --epochs 2 --out checkpoints/demo.pt
+    .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/demo.pt
 
 Demo mode creates artificial ten-class images for checking the code. Its metrics
 are not Fashion-MNIST benchmark results.
@@ -133,12 +149,13 @@ are not Fashion-MNIST benchmark results.
 
 - data.py: image loading, stratified train/validation split, [0, 1] scaling and split summary.
 - model.py: the multi-exit CNN and MLP (sharing stop-anywhere sequential
-  inference), a helper that rebuilds either from a checkpoint, and the earlier
-  single-exit DNN.
+  inference) and a helper that rebuilds either from a checkpoint.
 - train.py: multi-exit training, per-exit validation scoring, checkpoint
-  selection and timing.
-- evaluate.py: metrics for single-exit DNN checkpoints (being rebuilt for the
-  multi-exit network).
+  selection, timing, GPU/CPU choice and resuming.
+- evaluate.py: runs a checkpoint over the validation (or, once, the test) images
+  and saves every exit's outputs.
+- exit_outputs.py: saving and loading those outputs, and per-exit metrics, with
+  numpy only.
 - tests/: offline tests for the data pipeline, model, training and evaluation.
 
 ## Earlier EEG experiment
@@ -158,5 +175,6 @@ AI assistance: ChatGPT wrote and checked the initial model, data pipeline, train
 evaluation, and tests. The research experiments and interpretation remain ongoing.
 
 Claude (Anthropic) helped plan the early-exit experiments, removed the EEG code,
-and wrote the stratified split, the multi-exit MLP and CNN, multi-exit training
+and wrote the stratified split, the multi-exit MLP and CNN, multi-exit training,
+per-exit evaluation
 and their tests.

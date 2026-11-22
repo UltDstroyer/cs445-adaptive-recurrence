@@ -2,27 +2,8 @@ import json
 
 import numpy as np
 import pytest
-import torch
-from torch import nn
-from torch.nn import functional as F
 
 import data
-import evaluate
-import train
-from model import DNNClassifier
-
-
-def test_dnn_dense_layers_have_independent_weights_and_learn():
-    model = DNNClassifier(hidden_sizes=(16, 16), dropout=0)
-    dense = [layer for layer in model.modules() if isinstance(layer, nn.Linear)]
-    assert [(layer.in_features, layer.out_features) for layer in dense] == [(784, 16), (16, 16), (16, 10)]
-    assert len({layer.weight.data_ptr() for layer in dense}) == 3
-    recurrent_types = (nn.RNN, nn.GRU, nn.LSTM, nn.RNNCell, nn.GRUCell, nn.LSTMCell)
-    assert not any(isinstance(layer, recurrent_types) for layer in model.modules())
-    logits = model(torch.randn(12, 1, 28, 28))
-    assert logits.shape == (12, 10)
-    F.cross_entropy(logits, torch.arange(12) % 10).backward()
-    assert all(layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all() for layer in dense)
 
 
 def test_image_split_is_stratified_disjoint_reproducible_and_scaled_only():
@@ -99,59 +80,3 @@ def test_real_data_path_passes_cache_and_download_settings(monkeypatch, tmp_path
 def test_invalid_image_split_sizes(val_size):
     with pytest.raises(ValueError, match="val_size"):
         data.split_images(*data.demo_images(), val_size=val_size)
-
-
-def test_training_records_split_settings_and_evaluation_waits(tmp_path, monkeypatch):
-    monkeypatch.setattr(data, "load_fashion_mnist", lambda *args: pytest.fail("demo attempted download"))
-    checkpoint_path = tmp_path / "multi_exit.pt"
-    output_path = tmp_path / "evaluation.json"
-    train.main([
-        "--demo", "--epochs", "1", "--split-seed", "17", "--val-size", "120",
-        "--device", "cpu", "--out", str(checkpoint_path),
-    ])
-    checkpoint = torch.load(checkpoint_path, weights_only=True)
-    assert checkpoint["data_config"]["split_seed"] == 17
-    assert checkpoint["data_config"]["val_size"] == 120
-    assert checkpoint["data_config"]["split_method"] == data.SPLIT_METHOD
-    assert checkpoint["data_config"]["preprocessing"] == data.PREPROCESSING
-    assert "pixel_mean" not in checkpoint
-    # Evaluation of multi-exit checkpoints arrives with separate validation/test runs.
-    monkeypatch.setattr(evaluate, "get_image_splits", lambda **kwargs: pytest.fail("evaluation loaded images"))
-    with pytest.raises(SystemExit):
-        evaluate.main(["--checkpoint", str(checkpoint_path), "--out", str(output_path)])
-    assert not output_path.exists()
-
-
-def test_evaluation_confusion_and_macro_f1():
-    class Predictions(nn.Module):
-        num_classes = 3
-
-        def forward(self, x):
-            return x
-
-    logits = np.array([[10, 0, 0], [0, 10, 0], [0, 10, 0], [0, 0, 10]], dtype=np.float32)
-    metrics = evaluate.evaluate_images(Predictions(), logits, np.array([0, 0, 1, 2]), torch.device("cpu"), 3)
-    assert metrics["confusion_matrix"] == [[1, 1, 0], [0, 1, 0], [0, 0, 1]]
-    assert metrics["accuracy"] == 0.75
-    assert metrics["macro_f1"] == pytest.approx((2 / 3 + 2 / 3 + 1) / 3)
-
-
-def test_legacy_checkpoint_is_rejected_before_loading_images(tmp_path, monkeypatch):
-    path = tmp_path / "old.pt"
-    torch.save({"model_state": {}}, path)
-    monkeypatch.setattr(evaluate, "get_image_splits", lambda **kwargs: pytest.fail("legacy checkpoint loaded images"))
-    with pytest.raises(SystemExit):
-        evaluate.main(["--checkpoint", str(path)])
-
-
-def test_checkpoint_with_old_split_or_normalization_is_rejected(tmp_path, monkeypatch):
-    path = tmp_path / "standardized.pt"
-    torch.save({
-        "model_type": "dnn",
-        "data_config": {"dataset": "fashion-mnist", "demo": True, "data_dir": str(tmp_path),
-                        "val_size": 100, "split_seed": 7},
-        "pixel_mean": 0.3, "pixel_std": 0.35,
-    }, path)
-    monkeypatch.setattr(evaluate, "get_image_splits", lambda **kwargs: pytest.fail("old checkpoint loaded images"))
-    with pytest.raises(SystemExit):
-        evaluate.main(["--checkpoint", str(path), "--out", str(tmp_path / "out.json")])

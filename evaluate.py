@@ -1,91 +1,83 @@
-"""Evaluate a feedforward DNN on held-out Fashion-MNIST images."""
+"""Run a trained multi-exit network over one split and save every exit's outputs.
+
+Validation images are the default. The official test images are reserved for the
+single final evaluation: scoring them needs --split test --confirm-final-test,
+and an existing test output file is never overwritten.
+
+Each run writes two files next to each other:
+    <name>.npz   every exit's logits, the labels and the image indices
+                 (read them with exit_outputs.load_exit_outputs; no PyTorch needed)
+    <name>.json  per-exit accuracy, macro-F1 and loss, plus the run's settings
+"""
 
 import argparse
 import json
-import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 
 from data import PREPROCESSING, SPLIT_METHOD, get_image_splits
-from model import DNNClassifier
+from exit_outputs import exit_metrics, save_exit_outputs
+from model import build_model
 from train import DEVICE_CHOICES, make_loader, select_device
 
 
-def synchronize(device: torch.device) -> None:
-    """Wait for queued GPU work so timings measure the computation itself."""
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
 @torch.inference_mode()
-def evaluate_images(model, x, y, device, batch_size=128):
+def collect_logits(model, x, device, batch_size=256) -> np.ndarray:
+    """Every exit's logits for every image: [images, exits, classes] on the CPU."""
     model.eval()
-    confusion = np.zeros((model.num_classes, model.num_classes), dtype=np.int64)
-    total_loss = 0.0
-    for images, labels in make_loader(x, y, batch_size):
-        images, labels = images.to(device), labels.to(device)
-        logits = model(images)
-        total_loss += F.cross_entropy(logits, labels, reduction="sum").item()
-        predicted = logits.argmax(-1).cpu().numpy()
-        np.add.at(confusion, (labels.cpu().numpy(), predicted), 1)
-    support = confusion.sum(axis=1)
-    f1_denominator = support + confusion.sum(axis=0)
-    class_f1 = np.divide(
-        2 * confusion.diagonal(), f1_denominator,
-        out=np.zeros(model.num_classes, dtype=np.float64), where=f1_denominator > 0,
-    )
-    return {
-        "examples": len(y), "loss": total_loss / len(y),
-        "accuracy": float(confusion.trace() / len(y)),
-        "macro_f1": float(class_f1.mean()),
-        "class_counts": support.tolist(), "confusion_matrix": confusion.tolist(),
-    }
+    labels = np.zeros(len(x), dtype=np.int64)  # make_loader needs labels; they are not used here
+    batches = [model(images.to(device)).float().cpu() for images, _ in make_loader(x, labels, batch_size)]
+    return torch.cat(batches).numpy()
 
 
-@torch.inference_mode()
-def measure_latency(model, x, device, batch_size, repeats=3):
-    """Warm up and time batched forward passes, excluding data loading/transfer."""
-    images = torch.from_numpy(x[:batch_size]).to(device)
-    model.eval()
-    for _ in range(3):
-        model(images)
-    synchronize(device)
-    start = time.perf_counter()
-    for _ in range(repeats):
-        model(images)
-    synchronize(device)
-    return (time.perf_counter() - start) * 1000 / (repeats * len(images))
+def default_output(checkpoint: Path, split: str) -> Path:
+    return Path("results") / f"{checkpoint.stem}_{split}_outputs.npz"
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--checkpoint", type=Path, default=Path("checkpoints/dnn.pt"))
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--checkpoint", type=Path, default=Path("checkpoints/multi_exit.pt"))
+    p.add_argument("--split", choices=["val", "test"], default="val")
+    p.add_argument("--confirm-final-test", action="store_true",
+                   help="Required with --split test: the test set is scored once, at the end")
+    p.add_argument("--out", type=Path, help="Output .npz path (default: results/<checkpoint>_<split>_outputs.npz)")
+    p.add_argument("--overwrite", action="store_true", help="Replace an existing validation output")
     p.add_argument("--data-dir", type=Path, help="Override the dataset location saved in the checkpoint")
-    p.add_argument("--batch-size", type=int, default=128)
+    p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--device", choices=DEVICE_CHOICES, default="auto")
-    p.add_argument("--out", type=Path, default=Path("results/dnn_evaluation.json"))
     p.add_argument("--no-download", action="store_true")
     args = p.parse_args(argv)
     if args.batch_size < 1:
         p.error("batch-size must be positive")
-    if args.out.resolve() == args.checkpoint.resolve():
-        p.error("evaluation output and checkpoint paths must differ")
+    if args.split == "test" and not args.confirm_final_test:
+        p.error("the test split is reserved for the single final evaluation; "
+                "add --confirm-final-test only when running it")
+    out = args.out or default_output(args.checkpoint, args.split)
+    if out.suffix != ".npz":
+        p.error("--out must end in .npz")
+    summary_path = out.with_suffix(".json")
+    if out.exists() and (args.split == "test" or not args.overwrite):
+        p.error(f"{out} already exists" + (
+            "; test outputs are never overwritten" if args.split == "test" else "; add --overwrite to replace it"))
+    if out.resolve() == args.checkpoint.resolve():
+        p.error("output and checkpoint paths must differ")
+
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    if checkpoint.get("model_type") == "multi_exit":
-        p.error("evaluate.py does not support multi-exit checkpoints yet; "
-                "separate validation and test evaluation is still being built")
-    if checkpoint.get("model_type") != "dnn":
-        p.error("Expected a DNN checkpoint produced by train.py; this is a legacy or unsupported model")
+    if checkpoint.get("model_type") != "multi_exit":
+        p.error("Expected a multi-exit checkpoint produced by train.py; this is an older or unsupported model")
     data_config = checkpoint["data_config"]
     if data_config["dataset"] != "fashion-mnist":
         p.error("Unsupported checkpoint dataset")
     if (data_config.get("split_method"), data_config.get("preprocessing")) != (SPLIT_METHOD, PREPROCESSING):
         p.error("Checkpoint was trained with an older data split or pixel normalization; retrain it with train.py")
+    try:
+        device = select_device(args.device)
+    except ValueError as error:
+        p.error(str(error))
+
     data_dir = args.data_dir or Path(data_config["data_dir"])
     splits = get_image_splits(
         data_dir=data_dir, demo=data_config["demo"],
@@ -94,32 +86,39 @@ def main(argv=None):
     )
     if list(splits.class_names) != checkpoint["class_names"]:
         raise ValueError("Dataset class names differ from training")
-    device = select_device(args.device)
-    model = DNNClassifier(**checkpoint["model_config"]).to(device)
+    if args.split == "val":
+        x, labels, image_indices = splits.val_x, splits.val_y, splits.val_indices
+    else:
+        x, labels, image_indices = splits.test_x, splits.test_y, np.arange(len(splits.test_y))
+
+    model = build_model(checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["model_state"])
-    model.eval()
-    results = {
-        "model_type": "dnn", "model_config": checkpoint["model_config"],
-        "dataset": data_config["dataset"], "demo": data_config["demo"],
+    logits = collect_logits(model, x, device, args.batch_size)
+    metadata = {
+        "split": args.split,
+        "demo": data_config["demo"],
+        "checkpoint": str(args.checkpoint),
+        "checkpoint_epoch": checkpoint["epoch"],
+        "model_config": checkpoint["model_config"],
         "data_config": {**data_config, "data_dir": str(data_dir.resolve())},
-        "class_names": list(splits.class_names), "checkpoint_epoch": checkpoint["epoch"],
-        "parameters": sum(parameter.numel() for parameter in model.parameters()),
-        "device": str(device), "splits": {},
+        "training_config": checkpoint["training_config"],
+        "class_names": list(splits.class_names),
+        "evaluation_device": str(device),
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    print("SYNTHETIC IMAGE DEMO" if results["demo"] else "Fashion-MNIST DNN evaluation")
-    for name in ("val", "test"):
-        x, y = getattr(splits, f"{name}_x"), getattr(splits, f"{name}_y")
-        metrics = evaluate_images(model, x, y, device, args.batch_size)
-        metrics["forward_ms_per_image"] = measure_latency(model, x, device, args.batch_size)
-        metrics["latency_batch_size"] = min(args.batch_size, len(y))
-        results["splits"][name] = metrics
-        print(f"{name.upper()}: accuracy={metrics['accuracy']:.3f}, macro-F1={metrics['macro_f1']:.3f}, loss={metrics['loss']:.4f}")
-    results["latency_protocol"] = "Three warm-ups and three repeats on the first batch; forward only; excludes loading and device transfers."
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    print("Saved:", args.out)
-    if results["demo"]:
-        print("Synthetic demo accuracy is not a Fashion-MNIST benchmark result.")
+    save_exit_outputs(out, logits, labels, image_indices, metadata)
+    metrics = exit_metrics(logits, labels)
+    summary = {**metadata, "outputs": str(out), "images": int(len(labels)), **metrics,
+               "mean_macro_f1": float(np.mean(metrics["exit_macro_f1"]))}
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    print(("SYNTHETIC IMAGE DEMO, " if data_config["demo"] else "") +
+          f"{args.split} split: {len(labels)} images, checkpoint epoch {checkpoint['epoch']}, device {device}")
+    print(" exit  accuracy  macro-F1    loss")
+    for k, (acc, f1, loss) in enumerate(zip(metrics["exit_accuracy"], metrics["exit_macro_f1"], metrics["exit_loss"]), 1):
+        print(f"  {k:2d}    {acc:.3f}     {f1:.3f}    {loss:.4f}")
+    print("Saved:", out)
+    print("Summary:", summary_path)
 
 
 if __name__ == "__main__":
