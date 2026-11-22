@@ -20,7 +20,7 @@ import torch
 
 from data import PREPROCESSING, SPLIT_METHOD, get_image_splits
 from exit_outputs import exit_metrics, save_exit_outputs
-from model import build_model
+from model import build_model, count_multiply_adds
 from train import DEVICE_CHOICES, make_loader, select_device
 
 
@@ -105,6 +105,7 @@ def main(argv=None):
         "class_names": list(splits.class_names),
         "evaluation_device": str(device),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "multiply_adds": count_multiply_adds(model),
     }
     save_exit_outputs(out, logits, labels, image_indices, metadata)
     metrics = exit_metrics(logits, labels)

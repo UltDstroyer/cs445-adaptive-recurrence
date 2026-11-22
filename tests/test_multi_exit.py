@@ -12,34 +12,6 @@ def model(request):
     return (MultiExitClassifier() if request.param == "mlp" else MultiExitCNN()).eval()
 
 
-def multiply_adds_by_exit(model, x):
-    """Count convolution and linear multiply-adds per image, cumulative up to each exit."""
-    counts = {}
-
-    def hook(module, inputs, output):
-        if isinstance(module, nn.Conv2d):
-            per_output = module.in_channels // module.groups * module.kernel_size[0] * module.kernel_size[1]
-            counts[module] = counts.get(module, 0) + output[0].numel() * per_output
-        elif isinstance(module, nn.Linear):
-            counts[module] = counts.get(module, 0) + module.in_features * module.out_features
-
-    handles = [m.register_forward_hook(hook) for m in model.modules() if isinstance(m, (nn.Conv2d, nn.Linear))]
-    with torch.no_grad():
-        model(x[:1])
-    for handle in handles:
-        handle.remove()
-
-    def total(part):
-        return sum(counts.get(m, 0) for m in part.modules())
-
-    stem = model.stem if isinstance(model, MultiExitCNN) else model.projection
-    running, cumulative = total(stem), []
-    for block, head in zip(model.blocks, model.heads):
-        running += total(block) + total(head)
-        cumulative.append(running)
-    return cumulative
-
-
 def test_mlp_design_matches_the_original_plan():
     model = MultiExitClassifier()
     assert model.projection.in_features == 784 and model.projection.out_features == 32
@@ -61,11 +33,6 @@ def test_cnn_design_matches_the_revised_plan():
         h = block(h)
         shapes.append(tuple(h.shape[1:]))
     assert shapes == [(16, 14, 14)] * 3 + [(32, 7, 7)] * 7
-    cumulative = multiply_adds_by_exit(model, torch.rand(1, 1, 28, 28))
-    assert cumulative[-1] == 4_346_080
-    assert cumulative[:2] == [479_968, 931_712]
-    shares = [round(100 * c / cumulative[-1], 1) for c in cumulative]
-    assert shares == [11.0, 21.4, 31.8, 37.6, 48.0, 58.4, 68.8, 79.2, 89.6, 100.0]
 
 
 def test_output_is_batch_by_exit_by_class(model):

@@ -222,3 +222,44 @@ def build_model(config: dict) -> MultiExitNetwork:
     if "channels" in settings:
         settings["channels"] = tuple(settings["channels"])
     return ARCHITECTURES[architecture](**settings)
+
+
+def count_multiply_adds(model: MultiExitNetwork) -> dict:
+    """Multiply-adds per image for the stem, each block and each head.
+
+    Counts every use of a convolution or linear-layer weight while one image runs
+    through the whole network (all blocks and all heads). Normalization,
+    activations, pooling and bias additions are not counted. The result is
+    {"stem": int, "blocks": [int per block], "heads": [int per head]}; everything
+    not inside a block or head counts as the stem.
+    """
+    counts: dict[nn.Module, int] = {}
+
+    def record(module, inputs, output):
+        if isinstance(module, nn.Conv2d):
+            weights_per_output = module.in_channels // module.groups * math.prod(module.kernel_size)
+        else:
+            weights_per_output = module.in_features
+        counts[module] = counts.get(module, 0) + output[0].numel() * weights_per_output
+
+    layers = [m for m in model.modules() if isinstance(m, (nn.Conv2d, nn.Linear))]
+    handles = [layer.register_forward_hook(record) for layer in layers]
+    reference = next(model.parameters())
+    was_training = model.training
+    try:
+        model.eval()
+        with torch.no_grad():
+            model(torch.zeros((1, *model.input_shape), dtype=reference.dtype, device=reference.device))
+    finally:
+        model.train(was_training)
+        for handle in handles:
+            handle.remove()
+    if set(counts) != set(layers):
+        raise RuntimeError("Some convolution or linear layers did not run")
+
+    def total(part: nn.Module) -> int:
+        return int(sum(counts.get(m, 0) for m in part.modules()))
+
+    blocks = [total(block) for block in model.blocks]
+    heads = [total(head) for head in model.heads]
+    return {"stem": total(model) - sum(blocks) - sum(heads), "blocks": blocks, "heads": heads}

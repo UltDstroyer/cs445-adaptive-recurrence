@@ -127,6 +127,21 @@ from the .npz file with exit_outputs.load_exit_outputs, which needs only numpy:
 no PyTorch, model or images. An existing validation output is replaced only
 with --overwrite.
 
+Each output file also records the network's compute: multiply-adds per image for
+the stem, each block and each head (model.count_multiply_adds counts every
+convolution and linear-layer weight used; normalization, activations, pooling
+and biases are not counted). outputs.compute_profile() turns exit numbers into
+compute as a share of the full model:
+
+    profile = outputs.compute_profile()
+    profile.fractions()               # cost of stopping at each exit
+    profile.mean_fraction(exits)      # average cost for a stopping rule's exits
+
+Stopping at exit k costs the stem, blocks 1 to k and every head from 1 to k,
+because a stopping rule checks each of those heads. A fixed exit used on its own
+needs only its own head: pass all_heads=False. The full model (never stopping
+early) is 1.0.
+
 The official test images are for the single final evaluation. evaluate.py
 refuses --split test unless --confirm-final-test is also given, and never
 overwrites an existing test output.
@@ -176,5 +191,5 @@ evaluation, and tests. The research experiments and interpretation remain ongoin
 
 Claude (Anthropic) helped plan the early-exit experiments, removed the EEG code,
 and wrote the stratified split, the multi-exit MLP and CNN, multi-exit training,
-per-exit evaluation
+per-exit evaluation, compute accounting
 and their tests.

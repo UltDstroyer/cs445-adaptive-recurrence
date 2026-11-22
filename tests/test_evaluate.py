@@ -35,6 +35,7 @@ def test_validation_outputs_are_saved_for_every_exit(trained, tmp_path):
     assert outputs.metadata["split"] == "val"
     assert outputs.metadata["model_config"]["architecture"] == "cnn"
     assert outputs.metadata["evaluation_device"] == "cpu"
+    assert outputs.compute_profile().full == 4_346_080  # the demo trains the default CNN
 
     # The saved outputs reproduce the validation scores recorded during training.
     checkpoint = torch.load(trained, weights_only=True)
@@ -54,6 +55,7 @@ def test_saved_outputs_load_without_pytorch(trained, tmp_path):
         f"o = load_exit_outputs({str(out)!r})\n"
         "m = exit_metrics(o.logits, o.labels)\n"
         "assert o.probabilities().shape == (120, 10, 10)\n"
+        "assert round(o.compute_profile().fractions()[1], 3) == 0.214\n"
         "print(len(m['exit_macro_f1']))\n"
     )
     result = subprocess.run([sys.executable, "-c", script], cwd=REPO, capture_output=True, text=True)
