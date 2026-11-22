@@ -3,18 +3,46 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from model import MultiExitClassifier
+from model import MultiExitClassifier, MultiExitCNN, build_model
 
 
-@pytest.fixture
-def model():
+@pytest.fixture(params=["mlp", "cnn"])
+def model(request):
     torch.manual_seed(0)
-    return MultiExitClassifier().eval()
+    return (MultiExitClassifier() if request.param == "mlp" else MultiExitCNN()).eval()
 
 
-def test_default_design_matches_the_adopted_plan(model):
+def multiply_adds_by_exit(model, x):
+    """Count convolution and linear multiply-adds per image, cumulative up to each exit."""
+    counts = {}
+
+    def hook(module, inputs, output):
+        if isinstance(module, nn.Conv2d):
+            per_output = module.in_channels // module.groups * module.kernel_size[0] * module.kernel_size[1]
+            counts[module] = counts.get(module, 0) + output[0].numel() * per_output
+        elif isinstance(module, nn.Linear):
+            counts[module] = counts.get(module, 0) + module.in_features * module.out_features
+
+    handles = [m.register_forward_hook(hook) for m in model.modules() if isinstance(m, (nn.Conv2d, nn.Linear))]
+    with torch.no_grad():
+        model(x[:1])
+    for handle in handles:
+        handle.remove()
+
+    def total(part):
+        return sum(counts.get(m, 0) for m in part.modules())
+
+    stem = model.stem if isinstance(model, MultiExitCNN) else model.projection
+    running, cumulative = total(stem), []
+    for block, head in zip(model.blocks, model.heads):
+        running += total(block) + total(head)
+        cumulative.append(running)
+    return cumulative
+
+
+def test_mlp_design_matches_the_original_plan():
+    model = MultiExitClassifier()
     assert model.projection.in_features == 784 and model.projection.out_features == 32
-    assert len(model.blocks) == len(model.heads) == 10
     for block, head in zip(model.blocks, model.heads):
         assert (block.expand.in_features, block.expand.out_features) == (32, 128)
         assert (block.contract.in_features, block.contract.out_features) == (128, 32)
@@ -24,6 +52,22 @@ def test_default_design_matches_the_adopted_plan(model):
     assert sum(p.numel() for p in model.parameters()) == 112_580  # plus 10 LayerNorms
 
 
+def test_cnn_design_matches_the_revised_plan():
+    model = MultiExitCNN()
+    assert sum(p.numel() for p in model.parameters()) == 71_668
+    shapes = []
+    h = model.stem(torch.rand(1, 1, 28, 28))
+    for block in model.blocks:
+        h = block(h)
+        shapes.append(tuple(h.shape[1:]))
+    assert shapes == [(16, 14, 14)] * 3 + [(32, 7, 7)] * 7
+    cumulative = multiply_adds_by_exit(model, torch.rand(1, 1, 28, 28))
+    assert cumulative[-1] == 4_346_080
+    assert cumulative[:2] == [479_968, 931_712]
+    shares = [round(100 * c / cumulative[-1], 1) for c in cumulative]
+    assert shares == [11.0, 21.4, 31.8, 37.6, 48.0, 58.4, 68.8, 79.2, 89.6, 100.0]
+
+
 def test_output_is_batch_by_exit_by_class(model):
     assert model(torch.rand(7, 1, 28, 28)).shape == (7, 10, 10)
 
@@ -31,25 +75,26 @@ def test_output_is_batch_by_exit_by_class(model):
 def test_no_blocks_or_heads_share_weights(model):
     pointers = [p.data_ptr() for p in model.parameters()]
     assert len(pointers) == len(set(pointers))
-    weights = [block.expand.weight for block in model.blocks] + [head.weight for head in model.heads]
-    assert len({w.data_ptr() for w in weights}) == 20
-    assert not torch.equal(model.blocks[0].expand.weight, model.blocks[1].expand.weight)
+    assert len(model.blocks) == len(model.heads) == 10
+    first_weights = [next(part.parameters()) for part in [*model.blocks, *model.heads]]
+    assert len({w.data_ptr() for w in first_weights}) == 20
 
 
 def test_every_exit_trains_every_block_and_head(model):
     logits = model.train()(torch.rand(12, 1, 28, 28))
     labels = torch.arange(12) % 10
     F.cross_entropy(logits.flatten(0, 1), labels.repeat_interleave(10)).backward()
-    for parameter in model.parameters():
-        assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
-        assert parameter.grad.abs().sum() > 0
+    for name, parameter in model.named_parameters():
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
+        assert parameter.grad.abs().sum() > 0, name
 
 
 def test_exit_k_only_uses_the_first_k_blocks(model):
     x = torch.rand(4, 1, 28, 28)
     before = model(x)
     with torch.no_grad():
-        model.blocks[5].expand.weight.add_(1.0)
+        for parameter in model.blocks[5].parameters():
+            parameter.add_(0.5)
     after = model(x)
     torch.testing.assert_close(after[:, :5], before[:, :5])
     assert not torch.allclose(after[:, 5:], before[:, 5:])
@@ -112,5 +157,24 @@ def test_invalid_inputs_are_rejected(model):
         model.predict_sequential(torch.rand(2, 1, 28, 28), lambda n, h: torch.ones(len(h)), min_exit=11)
     with pytest.raises(ValueError, match="should_stop must return"):
         model.predict_sequential(torch.rand(3, 1, 28, 28), lambda n, h: torch.ones(1, dtype=torch.bool))
+
+
+def test_invalid_designs_are_rejected():
     with pytest.raises(ValueError, match="positive"):
         MultiExitClassifier(num_exits=0)
+    with pytest.raises(ValueError, match="downsample_at"):
+        MultiExitCNN(downsample_at=11)
+    with pytest.raises(ValueError, match="positive"):
+        MultiExitCNN(channels=(0, 32))
+
+
+def test_build_model_rebuilds_both_architectures_from_saved_configs():
+    cnn = build_model({"architecture": "cnn", "input_shape": [1, 28, 28], "channels": [16, 32],
+                       "downsample_at": 4, "num_exits": 10, "num_classes": 10})
+    assert isinstance(cnn, MultiExitCNN)
+    # MLP checkpoints saved before the CNN existed have no "architecture" key.
+    mlp = build_model({"input_shape": [1, 28, 28], "width": 32, "block_hidden": 128,
+                       "num_exits": 10, "num_classes": 10})
+    assert isinstance(mlp, MultiExitClassifier)
+    with pytest.raises(ValueError, match="Unknown architecture"):
+        build_model({"architecture": "rnn"})

@@ -1,4 +1,4 @@
-"""Fashion-MNIST classifiers: the multi-exit network and the single-exit DNN baseline."""
+"""Fashion-MNIST classifiers: multi-exit CNN and MLP, and the earlier single-exit DNN."""
 
 import math
 from collections.abc import Callable
@@ -14,6 +14,10 @@ DEFAULT_DROPOUT = 0.2
 DEFAULT_WIDTH = 32
 DEFAULT_BLOCK_HIDDEN = 128
 DEFAULT_NUM_EXITS = 10
+
+# Multi-exit 2D CNN (the step-8 fallback adopted on November 22, 2026).
+DEFAULT_CNN_CHANNELS = (16, 32)
+DEFAULT_CNN_DOWNSAMPLE_AT = 4
 
 
 class DNNClassifier(nn.Module):
@@ -65,39 +69,31 @@ class ResidualBlock(nn.Module):
 StopRule = Callable[[int, torch.Tensor], torch.Tensor]
 
 
-class MultiExitClassifier(nn.Module):
-    """Projection, then distinct residual blocks, each followed by its own classifier head.
+class MultiExitNetwork(nn.Module):
+    """A stem, then distinct blocks, each followed by its own classifier head.
 
     Exit k is the head after block k (exits are numbered from 1). Nothing is
-    shared between blocks or between heads.
+    shared between blocks or between heads. Subclasses build self.blocks and
+    self.heads and implement _stem.
     """
 
-    def __init__(
-        self,
-        input_shape: tuple[int, ...] = (1, 28, 28),
-        width: int = DEFAULT_WIDTH,
-        block_hidden: int = DEFAULT_BLOCK_HIDDEN,
-        num_exits: int = DEFAULT_NUM_EXITS,
-        num_classes: int = 10,
-    ):
-        super().__init__()
-        if not input_shape or min(*input_shape, width, block_hidden, num_exits, num_classes) < 1:
-            raise ValueError("Input, width, block, exit and class sizes must be positive")
-        self.input_shape = tuple(input_shape)
-        self.num_exits = num_exits
-        self.num_classes = num_classes
-        self.projection = nn.Linear(math.prod(input_shape), width)
-        self.blocks = nn.ModuleList(ResidualBlock(width, block_hidden) for _ in range(num_exits))
-        self.heads = nn.ModuleList(nn.Linear(width, num_classes) for _ in range(num_exits))
+    input_shape: tuple[int, ...]
+    num_exits: int
+    num_classes: int
+    blocks: nn.ModuleList
+    heads: nn.ModuleList
 
-    def _project(self, x: torch.Tensor) -> torch.Tensor:
+    def _stem(self, x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _check_input(self, x: torch.Tensor) -> None:
         if tuple(x.shape[1:]) != self.input_shape:
             raise ValueError(f"Expected input shape [batch, {self.input_shape}], got {tuple(x.shape)}")
-        return self.projection(x.flatten(1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Logits from every exit: [batch, num_exits, num_classes]."""
-        h = self._project(x)
+        self._check_input(x)
+        h = self._stem(x)
         logits = []
         for block, head in zip(self.blocks, self.heads):
             h = block(h)
@@ -122,7 +118,8 @@ class MultiExitClassifier(nn.Module):
         """
         if not 1 <= min_exit <= self.num_exits:
             raise ValueError("min_exit must be between 1 and num_exits")
-        h = self._project(x)
+        self._check_input(x)
+        h = self._stem(x)
         running = torch.arange(len(x), device=x.device)
         history = h.new_empty((len(x), 0, self.num_classes))
         chosen = h.new_empty((len(x), self.num_classes))
@@ -144,3 +141,119 @@ class MultiExitClassifier(nn.Module):
             if len(running) == 0:
                 break
         return chosen, exit_numbers
+
+
+class MultiExitClassifier(MultiExitNetwork):
+    """Multi-exit MLP: 784->width projection, residual MLP blocks and linear heads.
+
+    Failed the step-8 gate (flat accuracy across exits); kept for comparison.
+    """
+
+    def __init__(
+        self,
+        input_shape: tuple[int, ...] = (1, 28, 28),
+        width: int = DEFAULT_WIDTH,
+        block_hidden: int = DEFAULT_BLOCK_HIDDEN,
+        num_exits: int = DEFAULT_NUM_EXITS,
+        num_classes: int = 10,
+    ):
+        super().__init__()
+        if not input_shape or min(*input_shape, width, block_hidden, num_exits, num_classes) < 1:
+            raise ValueError("Input, width, block, exit and class sizes must be positive")
+        self.input_shape = tuple(input_shape)
+        self.num_exits = num_exits
+        self.num_classes = num_classes
+        self.projection = nn.Linear(math.prod(input_shape), width)
+        self.blocks = nn.ModuleList(ResidualBlock(width, block_hidden) for _ in range(num_exits))
+        self.heads = nn.ModuleList(nn.Linear(width, num_classes) for _ in range(num_exits))
+
+    def _stem(self, x: torch.Tensor) -> torch.Tensor:
+        return self.projection(x.flatten(1))
+
+
+class ConvBlock(nn.Module):
+    """Residual 3x3 convolution with its own weights: shortcut(h) + Conv(ReLU(Norm(h))).
+
+    With stride 2 or a change in channels, the shortcut is a 1x1 convolution.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+        super().__init__()
+        self.norm = nn.GroupNorm(1, in_channels)
+        self.conv = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
+        self.shortcut = (
+            nn.Identity() if stride == 1 and in_channels == out_channels
+            else nn.Conv2d(in_channels, out_channels, 1, stride=stride)
+        )
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        return self.shortcut(h) + self.conv(torch.relu(self.norm(h)))
+
+
+def conv_head(channels: int, num_classes: int) -> nn.Sequential:
+    """Normalize, average over the image, then a linear layer to class logits."""
+    return nn.Sequential(
+        nn.GroupNorm(1, channels), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(), nn.Linear(channels, num_classes),
+    )
+
+
+class MultiExitCNN(MultiExitNetwork):
+    """Multi-exit 2D CNN.
+
+    A 3x3 stride-2 stem (28x28 -> 14x14), residual 3x3 blocks with channels[0]
+    channels, then from block downsample_at onward channels[1] channels at half
+    the resolution (14x14 -> 7x7). Each block has its own pooled linear head.
+    """
+
+    def __init__(
+        self,
+        input_shape: tuple[int, ...] = (1, 28, 28),
+        channels: tuple[int, int] = DEFAULT_CNN_CHANNELS,
+        downsample_at: int = DEFAULT_CNN_DOWNSAMPLE_AT,
+        num_exits: int = DEFAULT_NUM_EXITS,
+        num_classes: int = 10,
+    ):
+        super().__init__()
+        if len(input_shape) != 3 or len(channels) != 2:
+            raise ValueError("input_shape must be (channels, height, width) and channels must have two values")
+        if min(*input_shape, *channels, num_exits, num_classes) < 1:
+            raise ValueError("Input, channel, exit and class sizes must be positive")
+        if not 2 <= downsample_at <= num_exits:
+            raise ValueError("downsample_at must be between 2 and num_exits")
+        self.input_shape = tuple(input_shape)
+        self.num_exits = num_exits
+        self.num_classes = num_classes
+        narrow, wide = channels
+        self.stem = nn.Conv2d(input_shape[0], narrow, 3, stride=2, padding=1)
+        blocks, heads = [], []
+        for number in range(1, num_exits + 1):
+            if number < downsample_at:
+                blocks.append(ConvBlock(narrow, narrow))
+            elif number == downsample_at:
+                blocks.append(ConvBlock(narrow, wide, stride=2))
+            else:
+                blocks.append(ConvBlock(wide, wide))
+            heads.append(conv_head(narrow if number < downsample_at else wide, num_classes))
+        self.blocks = nn.ModuleList(blocks)
+        self.heads = nn.ModuleList(heads)
+
+    def _stem(self, x: torch.Tensor) -> torch.Tensor:
+        return self.stem(x)
+
+
+ARCHITECTURES = {"cnn": MultiExitCNN, "mlp": MultiExitClassifier}
+
+
+def build_model(config: dict) -> MultiExitNetwork:
+    """Rebuild a multi-exit network from a saved model_config.
+
+    Configs saved before the CNN existed have no "architecture" key; they are MLPs.
+    """
+    settings = dict(config)
+    architecture = settings.pop("architecture", "mlp")
+    if architecture not in ARCHITECTURES:
+        raise ValueError(f"Unknown architecture {architecture!r}")
+    if "channels" in settings:
+        settings["channels"] = tuple(settings["channels"])
+    return ARCHITECTURES[architecture](**settings)

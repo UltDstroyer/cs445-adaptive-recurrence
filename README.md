@@ -9,18 +9,26 @@ macro-F1 and computation.
 training images and 10,000 test images. Each image is 28 by 28 pixels in grayscale,
 with one of ten clothing labels.
 
-The network is:
+The network is a small multi-exit CNN:
 
-    28 x 28 image -> Flatten (784) -> Linear (32)
-                  -> block 1 -> head 1 (10 classes)
-                  -> block 2 -> head 2
-                  ...
-                  -> block 10 -> head 10
+    28 x 28 image -> 3x3 conv, stride 2 (16 channels, 14 x 14)
+                  -> blocks 1-3: residual 3x3 conv, 16 channels at 14 x 14
+                  -> block 4: residual 3x3 conv, stride 2, 32 channels at 7 x 7
+                  -> blocks 5-10: residual 3x3 conv, 32 channels at 7 x 7
 
-Each block is residual, h + Linear(128->32)(ReLU(Linear(32->128)(LayerNorm(h)))),
-and every block and head has its own weights (112,580 parameters in total). Exit k
-is the head after block k. Training uses the cross-entropy averaged over all ten
-exits, with AdamW at learning rate 0.001.
+Each block is shortcut(h) + Conv(ReLU(GroupNorm(h))) and is followed by its own
+head (GroupNorm, ReLU, average over the image, linear layer to 10 classes). Exit k
+is the head after block k, and no blocks or heads share weights (71,668
+parameters). A full pass costs 4,346,080 multiply-adds; stopping at exit k costs
+11.0, 21.4, 31.8, 37.6, 48.0, 58.4, 68.8, 79.2, 89.6 or 100% of that. Training
+uses the cross-entropy averaged over all ten exits, with AdamW at learning rate
+0.001.
+
+The first design was a multi-exit MLP (784->32 projection, ten 32->128->32
+residual blocks). Its validation macro-F1 was flat across exits (exit 10 did not
+beat exit 2), leaving the stopping rules nothing to trade off, so the project
+switched to the CNN. The MLP is still available with --architecture mlp and is
+preserved at the git tag mlp-multi-exit.
 
 ## Setup
 
@@ -66,7 +74,8 @@ Useful options:
 
 --seed changes model initialization and training randomness. --split-seed changes
 which official training images are reserved for validation; keep it fixed across
-seeds. --width, --block-hidden and --num-exits change the network. --data-dir
+seeds. --architecture chooses cnn (default) or mlp; --channels and --downsample-at
+change the CNN, and --width and --block-hidden change the MLP. --data-dir
 changes the download/cache directory, and --no-download requires the data to
 exist locally.
 
@@ -89,8 +98,9 @@ are not Fashion-MNIST benchmark results.
 ## Project files
 
 - data.py: image loading, stratified train/validation split, [0, 1] scaling and split summary.
-- model.py: the multi-exit network with stop-anywhere sequential inference, and
-  the earlier single-exit DNN.
+- model.py: the multi-exit CNN and MLP (sharing stop-anywhere sequential
+  inference), a helper that rebuilds either from a checkpoint, and the earlier
+  single-exit DNN.
 - train.py: multi-exit training, per-exit validation scoring, checkpoint
   selection and timing.
 - evaluate.py: metrics for single-exit DNN checkpoints (being rebuilt for the
@@ -114,5 +124,5 @@ AI assistance: ChatGPT wrote and checked the initial model, data pipeline, train
 evaluation, and tests. The research experiments and interpretation remain ongoing.
 
 Claude (Anthropic) helped plan the early-exit experiments, removed the EEG code,
-and wrote the stratified split, the multi-exit network, multi-exit training and
-their tests.
+and wrote the stratified split, the multi-exit MLP and CNN, multi-exit training
+and their tests.

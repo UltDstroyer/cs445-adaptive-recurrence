@@ -1,4 +1,4 @@
-"""Train the multi-exit network on Fashion-MNIST with a loss at every exit.
+"""Train a multi-exit network (CNN by default) on Fashion-MNIST with a loss at every exit.
 
 The training loss is the cross-entropy averaged over all exits. After each epoch
 every exit is scored on the validation images, and the checkpoint keeps the
@@ -18,7 +18,10 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from data import DEFAULT_DATA_DIR, DEFAULT_SPLIT_SEED, PREPROCESSING, SPLIT_METHOD, get_image_splits
-from model import DEFAULT_BLOCK_HIDDEN, DEFAULT_NUM_EXITS, DEFAULT_WIDTH, MultiExitClassifier
+from model import (
+    ARCHITECTURES, DEFAULT_BLOCK_HIDDEN, DEFAULT_CNN_CHANNELS, DEFAULT_CNN_DOWNSAMPLE_AT,
+    DEFAULT_NUM_EXITS, DEFAULT_WIDTH, build_model,
+)
 
 PLANNED_SEEDS = 5
 
@@ -80,8 +83,14 @@ def main(argv=None):
     p.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     p.add_argument("--epochs", type=int, default=12)
     p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
-    p.add_argument("--block-hidden", type=int, default=DEFAULT_BLOCK_HIDDEN)
+    p.add_argument("--architecture", choices=sorted(ARCHITECTURES), default="cnn",
+                   help="cnn (default) or mlp (the earlier design, which failed the exit-gap check)")
+    p.add_argument("--channels", type=int, nargs=2, default=list(DEFAULT_CNN_CHANNELS),
+                   help="CNN: channels before and after the downsampling block")
+    p.add_argument("--downsample-at", type=int, default=DEFAULT_CNN_DOWNSAMPLE_AT,
+                   help="CNN: block that halves the resolution")
+    p.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="MLP only")
+    p.add_argument("--block-hidden", type=int, default=DEFAULT_BLOCK_HIDDEN, help="MLP only")
     p.add_argument("--num-exits", type=int, default=DEFAULT_NUM_EXITS)
     p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--weight-decay", type=float, default=0.0001)
@@ -96,8 +105,10 @@ def main(argv=None):
     p.add_argument("--demo", action="store_true", help="Artificial images for offline checks")
     p.add_argument("--no-download", action="store_true")
     args = p.parse_args(argv)
-    if min(args.epochs, args.batch_size, args.width, args.block_hidden, args.num_exits) < 1:
-        p.error("epochs, batch-size, width, block-hidden and num-exits must be positive")
+    if min(args.epochs, args.batch_size, args.width, args.block_hidden, args.num_exits, *args.channels) < 1:
+        p.error("epochs, batch-size, channels, width, block-hidden and num-exits must be positive")
+    if args.architecture == "cnn" and not 2 <= args.downsample_at <= args.num_exits:
+        p.error("downsample-at must be between 2 and num-exits")
     if args.patience < 0:
         p.error("patience cannot be negative")
     if not math.isfinite(args.lr) or args.lr <= 0:
@@ -121,12 +132,15 @@ def main(argv=None):
     )
     device = select_device(args.device)
     config = {
+        "architecture": args.architecture,
         "input_shape": list(splits.train_x.shape[1:]),
-        "width": args.width,
-        "block_hidden": args.block_hidden,
         "num_exits": args.num_exits,
         "num_classes": len(splits.class_names),
     }
+    if args.architecture == "cnn":
+        config.update(channels=list(args.channels), downsample_at=args.downsample_at)
+    else:
+        config.update(width=args.width, block_hidden=args.block_hidden)
     data_config = {
         "dataset": "fashion-mnist",
         "demo": args.demo,
@@ -142,11 +156,12 @@ def main(argv=None):
         "seed": args.seed, "device": str(device), "loss": "mean cross-entropy over exits",
         "selection": "best mean validation macro-F1 across exits, ties to lower loss",
     }
-    model = MultiExitClassifier(**config).to(device)
+    model = build_model(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loader = make_loader(splits.train_x, splits.train_y, args.batch_size, shuffle=True)
     print("SYNTHETIC IMAGE DEMO" if args.demo else "Fashion-MNIST", flush=True)
-    print("Multi-exit network:", config, f"({sum(p.numel() for p in model.parameters()):,} parameters)", flush=True)
+    print(f"Multi-exit {args.architecture.upper()}:", config,
+          f"({sum(p.numel() for p in model.parameters()):,} parameters)", flush=True)
     print(f"Examples: train={len(splits.train_y)}, val={len(splits.val_y)}", flush=True)
     best_key = (-1.0, -float("inf"))
     best_epoch, stale_epochs = 0, 0

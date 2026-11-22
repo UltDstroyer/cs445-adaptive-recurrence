@@ -6,7 +6,18 @@ import torch
 from torch.nn import functional as F
 
 import train
-from model import MultiExitClassifier
+from model import MultiExitClassifier, MultiExitCNN, build_model
+
+
+def test_mlp_can_still_be_trained(tmp_path):
+    checkpoint_path = tmp_path / "mlp.pt"
+    train.main(["--demo", "--epochs", "1", "--architecture", "mlp", "--device", "cpu", "--out", str(checkpoint_path)])
+    checkpoint = torch.load(checkpoint_path, weights_only=True)
+    assert checkpoint["model_config"] == {"architecture": "mlp", "input_shape": [1, 28, 28], "width": 32,
+                                          "block_hidden": 128, "num_exits": 10, "num_classes": 10}
+    model = build_model(checkpoint["model_config"])
+    assert isinstance(model, MultiExitClassifier)
+    model.load_state_dict(checkpoint["model_state"])
 
 
 def test_training_defaults_and_history_round_trip(tmp_path):
@@ -20,12 +31,13 @@ def test_training_defaults_and_history_round_trip(tmp_path):
     history = json.loads(history_path.read_text(encoding="utf-8"))
     config = checkpoint["model_config"]
     assert checkpoint["model_type"] == "multi_exit"
-    assert config == {"input_shape": [1, 28, 28], "width": 32, "block_hidden": 128,
-                      "num_exits": 10, "num_classes": 10}
+    assert config == {"architecture": "cnn", "input_shape": [1, 28, 28], "channels": [16, 32],
+                      "downsample_at": 4, "num_exits": 10, "num_classes": 10}
     assert checkpoint["training_config"]["lr"] == 0.001
     assert checkpoint["training_config"]["seed"] == 0
     assert checkpoint["data_config"]["dataset"] == "fashion-mnist"
-    model = MultiExitClassifier(**config)
+    model = build_model(config)
+    assert isinstance(model, MultiExitCNN)
     model.load_state_dict(checkpoint["model_state"])
     assert len(history["history"]) == history["epochs_completed"] == 2
     assert history["training_seconds"] > 0
@@ -87,7 +99,10 @@ def test_validation_metrics_are_reported_for_each_exit():
     assert result["exit_loss"][0] < result["exit_loss"][1]
 
 
-@pytest.mark.parametrize("arguments", [["--width", "0"], ["--patience", "-1"], ["--lr", "nan"]])
+@pytest.mark.parametrize("arguments", [
+    ["--width", "0"], ["--channels", "16", "0"], ["--downsample-at", "1"],
+    ["--patience", "-1"], ["--lr", "nan"],
+])
 def test_invalid_training_options_are_rejected_before_loading_data(arguments, monkeypatch):
     monkeypatch.setattr(train, "get_image_splits", lambda *args, **kwargs: pytest.fail("invalid options loaded data"))
     with pytest.raises(SystemExit):
