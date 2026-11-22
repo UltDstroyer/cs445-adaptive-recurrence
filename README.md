@@ -75,24 +75,27 @@ are not Fashion-MNIST benchmark results.
 ## Project files
 
 - data.py: image loading, train/validation split and normalization.
-- model.py: feedforward DNN and historical EEG model.
+- model.py: feedforward DNN.
 - train.py: DNN training, validation checkpointing and epoch history.
 - evaluate.py: DNN classification metrics and forward-pass timing.
 - tests/: offline tests for the data pipeline, model, training and evaluation.
 
-## Historical EEG work
+## Earlier EEG experiment
 
-The original EEG loading helpers, recurrent model and their regression tests
-remain for compatibility. The primary train.py and evaluate.py commands operate
-on DNN checkpoints; older EEG checkpoints cannot be evaluated with these commands.
-
-Optional EEG dependencies are listed in requirements-eeg.txt. EEG data inspection
-is available with python data.py --dataset eeg --subject 1. The obsolete untracked
-EEG research scripts, reports and experiment configurations have been removed.
+This project began as a recurrent-network experiment on EEG data. That code was
+removed from the working branch and is preserved at the git tag eeg-archive.
+EEG checkpoints cannot be evaluated with the current commands.
 
 ## Limitations
 
-Fashion-MNIST measures image classification; it does not test temporal memory or
-EEG decoding. Forward-pass timings exclude image loading and device transfers.
+Forward-pass timings exclude image loading and device transfers.
 Use multiple training seeds and hold out the test set when comparing model
 settings. No trained accuracy is assumed from the architecture alone.
+
+## AI use
+
+AI assistance: ChatGPT wrote and checked the initial model, data pipeline, training,
+evaluation, and tests. The research experiments and interpretation remain ongoing.
+
+Claude (Anthropic) helped plan the early-exit experiments and removed the EEG code
+from this branch.
