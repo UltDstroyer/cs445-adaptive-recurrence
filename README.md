@@ -146,11 +146,37 @@ The official test images are for the single final evaluation. evaluate.py
 refuses --split test unless --confirm-final-test is also given, and never
 overwrites an existing test output.
 
+## Baselines and the confidence sweep
+
+    .venv\Scripts\python.exe logistic.py
+    .venv\Scripts\python.exe sweep.py results/multi_exit_val_outputs.npz --logistic results/logistic_val_outputs.npz
+
+logistic.py fits the sanity baseline, multinomial logistic regression on the 784
+pixels (full-batch L-BFGS from zeros with a fixed L2 penalty of 1e-4, no tuning),
+on the training images and saves its validation outputs.
+
+sweep.py works from saved validation outputs only and reports:
+
+- every fixed exit used on its own (compute charges only that exit's head);
+- never stopping early, which must reproduce the last exit exactly;
+- confidence-only stopping (Kaya et al.): from exit 2 onward, stop once the top
+  class probability reaches a threshold, for thresholds from 0.10 to 1 - 1e-7
+  (the exits are often overconfident, so many useful thresholds are above 0.99);
+- the logistic-regression baseline, when given;
+- a random sample of validation images with every exit's prediction, to inspect.
+
+Results go to results/<name>_val_baselines.json. sweep.py refuses test-split
+outputs unless --final-test is given. Stopping rules live in rules.py (numpy
+only); applying a rule to saved outputs picks the same exits as running the
+network one exit at a time.
+
 ## Offline pipeline check
 
     .venv\Scripts\python.exe data.py --demo
     .venv\Scripts\python.exe train.py --demo --epochs 2 --out checkpoints/demo.pt
     .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/demo.pt
+    .venv\Scripts\python.exe logistic.py --demo
+    .venv\Scripts\python.exe sweep.py results/demo_val_outputs.npz --logistic results/logistic_demo_val_outputs.npz
 
 Demo mode creates artificial ten-class images for checking the code. Its metrics
 are not Fashion-MNIST benchmark results.
@@ -169,8 +195,12 @@ are not Fashion-MNIST benchmark results.
   selection, timing, GPU/CPU choice and resuming.
 - evaluate.py: runs a checkpoint over the validation (or, once, the test) images
   and saves every exit's outputs.
-- exit_outputs.py: saving and loading those outputs, and per-exit metrics, with
-  numpy only.
+- exit_outputs.py: saving and loading those outputs, per-exit metrics and
+  compute accounting, with numpy only.
+- rules.py: stopping rules applied to saved outputs (numpy only).
+- logistic.py: the logistic-regression baseline on pixels.
+- sweep.py: fixed exits, never-stop check, confidence sweep and a sample of
+  predictions to inspect.
 - tests/: offline tests for the data pipeline, model, training and evaluation.
 
 ## Earlier EEG experiment
@@ -191,5 +221,5 @@ evaluation, and tests. The research experiments and interpretation remain ongoin
 
 Claude (Anthropic) helped plan the early-exit experiments, removed the EEG code,
 and wrote the stratified split, the multi-exit MLP and CNN, multi-exit training,
-per-exit evaluation, compute accounting
+per-exit evaluation, compute accounting, the baselines and confidence sweep
 and their tests.
