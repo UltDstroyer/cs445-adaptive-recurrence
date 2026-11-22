@@ -83,7 +83,9 @@ are not Fashion-MNIST benchmark results.
 ## Project files
 
 - data.py: image loading, stratified train/validation split, [0, 1] scaling and split summary.
-- model.py: feedforward DNN.
+- model.py: multi-exit network (784→32 projection, ten 32→128→32 residual blocks,
+  each with its own 10-class head) with stop-anywhere sequential inference, plus the
+  single-exit DNN that train.py still uses.
 - train.py: DNN training, validation checkpointing and epoch history.
 - evaluate.py: DNN classification metrics and forward-pass timing.
 - tests/: offline tests for the data pipeline, model, training and evaluation.
