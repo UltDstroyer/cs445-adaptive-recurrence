@@ -99,9 +99,76 @@ def test_validation_metrics_are_reported_for_each_exit():
     assert result["exit_loss"][0] < result["exit_loss"][1]
 
 
+def _without_timing(rows):
+    return [{k: v for k, v in row.items() if k != "seconds"} for row in rows]
+
+
+def test_interrupted_run_resumes_to_the_same_result(tmp_path, monkeypatch):
+    common = ["--demo", "--epochs", "3", "--device", "cpu", "--threads", "1"]
+    straight = tmp_path / "straight.pt"
+    train.main(common + ["--out", str(straight)])
+
+    resumed = tmp_path / "resumed.pt"
+    real_evaluate, calls = train.evaluate_split, []
+
+    def interrupt_in_epoch_2(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(train, "evaluate_split", interrupt_in_epoch_2)
+    with pytest.raises(SystemExit) as stopped:
+        train.main(common + ["--out", str(resumed)])
+    assert stopped.value.code == 130
+    state = torch.load(train.resume_path(resumed), weights_only=True)
+    assert state["epoch"] == 1
+    monkeypatch.setattr(train, "evaluate_split", real_evaluate)
+    train.main(common + ["--out", str(resumed), "--resume"])
+
+    a = json.loads(straight.with_name("straight_training.json").read_text())
+    b = json.loads(resumed.with_name("resumed_training.json").read_text())
+    assert _without_timing(a["history"]) == _without_timing(b["history"])
+    assert a["best_epoch"] == b["best_epoch"]
+    first, second = (torch.load(p, weights_only=True)["model_state"] for p in (straight, resumed))
+    for name in first:
+        torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
+
+
+def test_resume_extends_a_finished_run_and_rejects_changed_settings(tmp_path):
+    out = tmp_path / "run.pt"
+    common = ["--demo", "--device", "cpu", "--out", str(out)]
+    train.main(common + ["--epochs", "1"])
+    train.main(common + ["--epochs", "2", "--resume"])
+    history = json.loads(out.with_name("run_training.json").read_text())
+    assert [row["epoch"] for row in history["history"]] == [1, 2]
+    with pytest.raises(SystemExit):
+        train.main(common + ["--epochs", "3", "--resume", "--lr", "0.01"])
+    with pytest.raises(SystemExit):
+        train.main(["--demo", "--resume", "--out", str(tmp_path / "never_started.pt")])
+
+
+def test_device_selection_prefers_cuda_then_mps_then_cpu(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert train.select_device("auto").type == "cuda"
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(train, "mps_available", lambda: True)
+    assert train.select_device("auto").type == "mps"
+    monkeypatch.setattr(train, "mps_available", lambda: False)
+    assert train.select_device("auto").type == "cpu"
+    with pytest.raises(ValueError, match="no Apple-silicon GPU"):
+        train.select_device("mps")
+    with pytest.raises(ValueError, match="no NVIDIA GPU"):
+        train.select_device("cuda")
+
+
+def test_default_training_length_is_30_epochs():
+    assert train.DEFAULT_EPOCHS == 30
+
+
 @pytest.mark.parametrize("arguments", [
     ["--width", "0"], ["--channels", "16", "0"], ["--downsample-at", "1"],
-    ["--patience", "-1"], ["--lr", "nan"],
+    ["--patience", "-1"], ["--lr", "nan"], ["--threads", "0"],
 ])
 def test_invalid_training_options_are_rejected_before_loading_data(arguments, monkeypatch):
     monkeypatch.setattr(train, "get_image_splits", lambda *args, **kwargs: pytest.fail("invalid options loaded data"))

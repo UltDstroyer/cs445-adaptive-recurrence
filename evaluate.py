@@ -11,7 +11,15 @@ from torch.nn import functional as F
 
 from data import PREPROCESSING, SPLIT_METHOD, get_image_splits
 from model import DNNClassifier
-from train import make_loader, select_device
+from train import DEVICE_CHOICES, make_loader, select_device
+
+
+def synchronize(device: torch.device) -> None:
+    """Wait for queued GPU work so timings measure the computation itself."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 @torch.inference_mode()
@@ -46,13 +54,11 @@ def measure_latency(model, x, device, batch_size, repeats=3):
     model.eval()
     for _ in range(3):
         model(images)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    synchronize(device)
     start = time.perf_counter()
     for _ in range(repeats):
         model(images)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    synchronize(device)
     return (time.perf_counter() - start) * 1000 / (repeats * len(images))
 
 
@@ -61,7 +67,7 @@ def main(argv=None):
     p.add_argument("--checkpoint", type=Path, default=Path("checkpoints/dnn.pt"))
     p.add_argument("--data-dir", type=Path, help="Override the dataset location saved in the checkpoint")
     p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    p.add_argument("--device", choices=DEVICE_CHOICES, default="auto")
     p.add_argument("--out", type=Path, default=Path("results/dnn_evaluation.json"))
     p.add_argument("--no-download", action="store_true")
     args = p.parse_args(argv)

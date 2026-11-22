@@ -42,6 +42,38 @@ On macOS/Linux, use .venv/bin/python in place of .venv\Scripts\python.exe.
     .venv\Scripts\python.exe data.py
     .venv\Scripts\python.exe train.py --seed 0
 
+Training runs for 30 epochs. There are two ways to run it:
+
+**Fast, on a GPU.** The default, --device auto, uses an NVIDIA GPU (cuda) or an
+Apple-silicon Mac's GPU (mps) when one is available, and otherwise the CPU.
+
+    .venv/bin/python train.py --seed 0
+
+**On a slower computer, on the CPU.** Use a few threads; for this small network
+2 threads were faster than 6 on our test machine and leave the computer usable.
+Progress is saved after every epoch, so a run can be stopped with Ctrl+C (or by
+closing the laptop) and continued later with the same command plus --resume:
+
+    .venv\Scripts\python.exe train.py --seed 0 --device cpu --threads 2
+    .venv\Scripts\python.exe train.py --seed 0 --device cpu --threads 2 --resume
+
+A resumed run continues exactly where it stopped, and --resume refuses to continue
+if the model, data or training settings differ (only --epochs, --device and
+--threads may change). Free Google Colab GPUs (cuda) are another option.
+
+| Computer (one epoch, about 54,000 images) | Time per epoch | 30 epochs |
+|---|--:|--:|
+| Apple M5 Max GPU (mps) | 3.7 s | about 2 min |
+| Apple M5 Max CPU, 2 threads | 27 s | about 13 min |
+| Apple M5 Max CPU, 6 threads | 36 s | about 18 min |
+
+Older laptops will be slower on the CPU. train.py prints each epoch's time and
+an estimate for five seeds.
+
+The same seed gives slightly different numbers on a GPU and on a CPU, so train
+all five seeds used for the final results on one computer and device.
+Checkpoints record the device used.
+
 The first run downloads Fashion-MNIST from the publisher's HTTPS repository into
 data/vision/. The official training partition is split into 54,000 training and
 6,000 validation images. The split is stratified, so validation has 600 images
@@ -67,6 +99,8 @@ Default outputs:
   split settings and per-exit validation scores.
 - checkpoints/multi_exit_training.json: epoch-by-epoch validation scores for
   every exit, epoch times and training settings.
+- checkpoints/multi_exit_resume.pt: progress saved after every epoch, used by
+  --resume.
 
 Useful options:
 
