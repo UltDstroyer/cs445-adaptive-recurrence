@@ -70,6 +70,9 @@ def main(argv=None):
     if args.out.resolve() == args.checkpoint.resolve():
         p.error("evaluation output and checkpoint paths must differ")
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    if checkpoint.get("model_type") == "multi_exit":
+        p.error("evaluate.py does not support multi-exit checkpoints yet; "
+                "separate validation and test evaluation is still being built")
     if checkpoint.get("model_type") != "dnn":
         p.error("Expected a DNN checkpoint produced by train.py; this is a legacy or unsupported model")
     data_config = checkpoint["data_config"]

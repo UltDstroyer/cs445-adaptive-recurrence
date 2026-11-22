@@ -1,9 +1,15 @@
-"""Train a feedforward DNN on Fashion-MNIST with validation checkpointing."""
+"""Train the multi-exit network on Fashion-MNIST with a loss at every exit.
+
+The training loss is the cross-entropy averaged over all exits. After each epoch
+every exit is scored on the validation images, and the checkpoint keeps the
+epoch with the best macro-F1 averaged across exits (ties go to lower loss).
+"""
 
 import argparse
 import json
 import math
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +18,9 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from data import DEFAULT_DATA_DIR, DEFAULT_SPLIT_SEED, PREPROCESSING, SPLIT_METHOD, get_image_splits
-from model import DEFAULT_DROPOUT, DEFAULT_HIDDEN_SIZES, DNNClassifier
+from model import DEFAULT_BLOCK_HIDDEN, DEFAULT_NUM_EXITS, DEFAULT_WIDTH, MultiExitClassifier
+
+PLANNED_SEEDS = 5
 
 
 def select_device(choice: str) -> torch.device:
@@ -26,16 +34,45 @@ def make_loader(x, y, batch_size, shuffle=False):
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
+def multi_exit_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy averaged over every exit and image; logits are [batch, exits, classes]."""
+    return F.cross_entropy(logits.flatten(0, 1), labels.repeat_interleave(logits.shape[1]))
+
+
+def macro_f1(labels: np.ndarray, predicted: np.ndarray, num_classes: int) -> float:
+    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
+    np.add.at(confusion, (labels, predicted), 1)
+    denominator = confusion.sum(axis=0) + confusion.sum(axis=1)
+    f1 = np.divide(
+        2 * confusion.diagonal(), denominator,
+        out=np.zeros(num_classes, dtype=np.float64), where=denominator > 0,
+    )
+    return float(f1.mean())
+
+
 @torch.inference_mode()
 def evaluate_split(model, x, y, device, batch_size=128):
+    """Loss, accuracy and macro-F1 for every exit on one split."""
     model.eval()
-    loss, correct = 0.0, 0
+    loss_sums = torch.zeros(model.num_exits, dtype=torch.float64)
+    predictions = []
     for images, labels in make_loader(x, y, batch_size):
         images, labels = images.to(device), labels.to(device)
         logits = model(images)
-        loss += F.cross_entropy(logits, labels, reduction="sum").item()
-        correct += int((logits.argmax(-1) == labels).sum())
-    return {"loss": loss / len(y), "accuracy": correct / len(y)}
+        per_image = F.cross_entropy(logits.transpose(1, 2), labels[:, None].expand(-1, model.num_exits), reduction="none")
+        loss_sums += per_image.sum(dim=0).double().cpu()
+        predictions.append(logits.argmax(-1).cpu())
+    predicted = torch.cat(predictions).numpy()  # [images, exits]
+    exit_loss = (loss_sums / len(y)).tolist()
+    exit_accuracy = [float((predicted[:, k] == y).mean()) for k in range(model.num_exits)]
+    exit_macro_f1 = [macro_f1(y, predicted[:, k], model.num_classes) for k in range(model.num_exits)]
+    return {
+        "loss": float(np.mean(exit_loss)),
+        "mean_macro_f1": float(np.mean(exit_macro_f1)),
+        "exit_loss": exit_loss,
+        "exit_accuracy": exit_accuracy,
+        "exit_macro_f1": exit_macro_f1,
+    }
 
 
 def main(argv=None):
@@ -43,25 +80,26 @@ def main(argv=None):
     p.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     p.add_argument("--epochs", type=int, default=12)
     p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--hidden-sizes", type=int, nargs="+", default=list(DEFAULT_HIDDEN_SIZES))
-    p.add_argument("--dropout", type=float, default=DEFAULT_DROPOUT)
+    p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--block-hidden", type=int, default=DEFAULT_BLOCK_HIDDEN)
+    p.add_argument("--num-exits", type=int, default=DEFAULT_NUM_EXITS)
     p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--weight-decay", type=float, default=0.0001)
     p.add_argument("--patience", type=int, default=0, help="Stop after this many unimproved epochs; 0 disables")
-    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--seed", type=int, default=0, help="Model initialization and training randomness")
     p.add_argument("--split-seed", type=int, default=DEFAULT_SPLIT_SEED,
                    help="Keep fixed across training seeds so every run uses the same validation images")
     p.add_argument("--val-size", type=int)
     p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
-    p.add_argument("--out", type=Path, default=Path("checkpoints/dnn.pt"))
+    p.add_argument("--out", type=Path, default=Path("checkpoints/multi_exit.pt"))
     p.add_argument("--history", type=Path)
     p.add_argument("--demo", action="store_true", help="Artificial images for offline checks")
     p.add_argument("--no-download", action="store_true")
     args = p.parse_args(argv)
-    if min(args.epochs, args.batch_size, *args.hidden_sizes) < 1:
-        p.error("epochs, batch-size and hidden-sizes must be positive")
-    if not 0 <= args.dropout < 1 or args.patience < 0:
-        p.error("dropout must be in [0, 1); patience cannot be negative")
+    if min(args.epochs, args.batch_size, args.width, args.block_hidden, args.num_exits) < 1:
+        p.error("epochs, batch-size, width, block-hidden and num-exits must be positive")
+    if args.patience < 0:
+        p.error("patience cannot be negative")
     if not math.isfinite(args.lr) or args.lr <= 0:
         p.error("lr must be finite and positive")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
@@ -84,9 +122,10 @@ def main(argv=None):
     device = select_device(args.device)
     config = {
         "input_shape": list(splits.train_x.shape[1:]),
-        "hidden_sizes": list(args.hidden_sizes),
+        "width": args.width,
+        "block_hidden": args.block_hidden,
+        "num_exits": args.num_exits,
         "num_classes": len(splits.class_names),
-        "dropout": args.dropout,
     }
     data_config = {
         "dataset": "fashion-mnist",
@@ -100,71 +139,84 @@ def main(argv=None):
     training_config = {
         "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
         "weight_decay": args.weight_decay, "patience": args.patience,
-        "seed": args.seed, "device": str(device),
+        "seed": args.seed, "device": str(device), "loss": "mean cross-entropy over exits",
+        "selection": "best mean validation macro-F1 across exits, ties to lower loss",
     }
-    model = DNNClassifier(**config).to(device)
+    model = MultiExitClassifier(**config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loader = make_loader(splits.train_x, splits.train_y, args.batch_size, shuffle=True)
     print("SYNTHETIC IMAGE DEMO" if args.demo else "Fashion-MNIST", flush=True)
-    print("Feedforward DNN:", config, flush=True)
-    print(f"Examples: train={len(splits.train_y)}, val={len(splits.val_y)}, test={len(splits.test_y)}", flush=True)
+    print("Multi-exit network:", config, f"({sum(p.numel() for p in model.parameters()):,} parameters)", flush=True)
+    print(f"Examples: train={len(splits.train_y)}, val={len(splits.val_y)}", flush=True)
     best_key = (-1.0, -float("inf"))
     best_epoch, stale_epochs = 0, 0
     history = []
+    run_start = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.perf_counter()
         model.train()
-        total_loss, correct = 0.0, 0
+        total_loss = 0.0
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad(set_to_none=True)
-            logits = model(images)
-            loss = F.cross_entropy(logits, labels)
+            loss = multi_exit_loss(model(images), labels)
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * len(images)
-            correct += int((logits.detach().argmax(-1) == labels).sum())
         val = evaluate_split(model, splits.val_x, splits.val_y, device, args.batch_size)
         row = {
-            "epoch": epoch, "train_loss": total_loss / len(splits.train_y),
-            "train_accuracy": correct / len(splits.train_y),
-            "val_loss": val["loss"], "val_accuracy": val["accuracy"],
+            "epoch": epoch,
+            "train_loss": total_loss / len(splits.train_y),
+            "val_loss": val["loss"],
+            "val_mean_macro_f1": val["mean_macro_f1"],
+            "val_exit_macro_f1": val["exit_macro_f1"],
+            "val_exit_accuracy": val["exit_accuracy"],
+            "val_exit_loss": val["exit_loss"],
+            "seconds": time.perf_counter() - epoch_start,
         }
         history.append(row)
         print(
-            f"Epoch {epoch:02d}: train loss={row['train_loss']:.4f}, "
-            f"train accuracy={row['train_accuracy']:.3f}, "
-            f"val loss={row['val_loss']:.4f}, val accuracy={row['val_accuracy']:.3f}",
+            f"Epoch {epoch:02d} ({row['seconds']:.1f}s): train loss={row['train_loss']:.4f}, "
+            f"val loss={row['val_loss']:.4f}, val macro-F1 mean={row['val_mean_macro_f1']:.3f}, "
+            f"exit 1={val['exit_macro_f1'][0]:.3f}, last exit={val['exit_macro_f1'][-1]:.3f}",
             flush=True,
         )
-        key = (val["accuracy"], -val["loss"])
+        key = (val["mean_macro_f1"], -val["loss"])
         if key > best_key:
             best_key, best_epoch, stale_epochs = key, epoch, 0
             args.out.parent.mkdir(parents=True, exist_ok=True)
             torch.save({
-                "model_type": "dnn", "model_state": model.state_dict(),
+                "model_type": "multi_exit", "model_state": model.state_dict(),
                 "model_config": config, "data_config": data_config,
                 "training_config": training_config,
                 "class_names": list(splits.class_names),
-                "val_accuracy": val["accuracy"], "val_loss": val["loss"], "epoch": epoch,
+                "val_mean_macro_f1": val["mean_macro_f1"], "val_loss": val["loss"],
+                "val_exit_macro_f1": val["exit_macro_f1"], "val_exit_accuracy": val["exit_accuracy"],
+                "epoch": epoch,
             }, args.out)
         else:
             stale_epochs += 1
         if args.patience and stale_epochs >= args.patience:
             break
+    training_seconds = time.perf_counter() - run_start
 
     history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.write_text(json.dumps({
-        "model_type": "dnn", "model_config": config, "data_config": data_config,
+        "model_type": "multi_exit", "model_config": config, "data_config": data_config,
         "training_config": training_config, "history": history,
         "best_epoch": best_epoch, "epochs_completed": len(history),
         "stopped_early": len(history) < args.epochs,
+        "training_seconds": training_seconds,
     }, indent=2), encoding="utf-8")
-    print(f"Best validation accuracy: {best_key[0]:.3f}")
+    best = history[best_epoch - 1]
+    print(f"Best epoch {best_epoch}: mean validation macro-F1 {best['val_mean_macro_f1']:.3f}")
+    print("Validation macro-F1 by exit:", [round(v, 3) for v in best["val_exit_macro_f1"]])
+    print(f"Training time: {training_seconds / 60:.1f} min on {device}; "
+          f"about {PLANNED_SEEDS * training_seconds / 60:.0f} min for {PLANNED_SEEDS} seeds")
     print("Checkpoint:", args.out)
     print("Training history:", history_path)
-    print("Next: python evaluate.py --checkpoint", args.out)
     if args.demo:
-        print("Synthetic demo accuracy is not a Fashion-MNIST benchmark result.")
+        print("Synthetic demo results are not Fashion-MNIST benchmark results.")
 
 
 if __name__ == "__main__":

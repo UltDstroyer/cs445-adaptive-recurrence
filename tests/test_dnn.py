@@ -101,30 +101,25 @@ def test_invalid_image_split_sizes(val_size):
         data.split_images(*data.demo_images(), val_size=val_size)
 
 
-def test_demo_training_and_evaluation_round_trip(tmp_path, monkeypatch):
+def test_training_records_split_settings_and_evaluation_waits(tmp_path, monkeypatch):
     monkeypatch.setattr(data, "load_fashion_mnist", lambda *args: pytest.fail("demo attempted download"))
-    checkpoint_path = tmp_path / "dnn.pt"
+    checkpoint_path = tmp_path / "multi_exit.pt"
     output_path = tmp_path / "evaluation.json"
     train.main([
-        "--demo", "--epochs", "2", "--hidden-sizes", "32", "16", "--dropout", "0",
-        "--split-seed", "17", "--val-size", "120", "--device", "cpu", "--out", str(checkpoint_path),
+        "--demo", "--epochs", "1", "--split-seed", "17", "--val-size", "120",
+        "--device", "cpu", "--out", str(checkpoint_path),
     ])
     checkpoint = torch.load(checkpoint_path, weights_only=True)
-    evaluate.main(["--checkpoint", str(checkpoint_path), "--batch-size", "17", "--out", str(output_path)])
-    result = json.loads(output_path.read_text())
-    assert result["model_type"] == "dnn" and result["demo"]
-    assert result["data_config"]["split_seed"] == 17
-    assert result["data_config"]["split_method"] == checkpoint["data_config"]["split_method"] == data.SPLIT_METHOD
-    assert result["data_config"]["preprocessing"] == data.PREPROCESSING
+    assert checkpoint["data_config"]["split_seed"] == 17
+    assert checkpoint["data_config"]["val_size"] == 120
+    assert checkpoint["data_config"]["split_method"] == data.SPLIT_METHOD
+    assert checkpoint["data_config"]["preprocessing"] == data.PREPROCESSING
     assert "pixel_mean" not in checkpoint
-    assert result["splits"]["val"]["examples"] == 120
-    assert result["splits"]["test"]["examples"] == 100
-    for split in result["splits"].values():
-        assert 0 <= split["accuracy"] <= 1 and 0 <= split["macro_f1"] <= 1
-        matrix = np.asarray(split["confusion_matrix"])
-        assert matrix.shape == (10, 10) and matrix.sum() == split["examples"]
-        assert split["accuracy"] == matrix.trace() / matrix.sum()
-    assert result["splits"]["val"]["accuracy"] == checkpoint["val_accuracy"]
+    # Evaluation of multi-exit checkpoints arrives with separate validation/test runs.
+    monkeypatch.setattr(evaluate, "get_image_splits", lambda **kwargs: pytest.fail("evaluation loaded images"))
+    with pytest.raises(SystemExit):
+        evaluate.main(["--checkpoint", str(checkpoint_path), "--out", str(output_path)])
+    assert not output_path.exists()
 
 
 def test_evaluation_confusion_and_macro_f1():
